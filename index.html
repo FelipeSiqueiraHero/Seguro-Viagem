@@ -1295,37 +1295,69 @@ document.getElementById('opSearch').addEventListener('input', e => {
 document.getElementById('opPrev').addEventListener('click', () => { opState.page--; renderOpTable(filtered()); });
 document.getElementById('opNext').addEventListener('click', () => { opState.page++; renderOpTable(filtered()); });
 
+// Parseia um ArrayBuffer (CSV ou XLSX) e popula rawData + dashboard.
+// Reutilizada tanto pelo upload manual quanto pelo auto-load do repositório.
+async function parseAndLoad(buffer, filename){
+  const ext = filename.split('.').pop().toLowerCase();
+  let aoa;
+  if(ext === 'csv'){
+    const text = new TextDecoder('utf-8').decode(buffer);
+    // Detecta o separador olhando a primeira linha (cabeçalho).
+    // CSV pt-BR do Excel usa ";" (porque "," é o separador decimal).
+    // CSV en-US usa ",". Detectamos automaticamente pela contagem.
+    const firstLine = text.split(/\r?\n/)[0] || '';
+    const semiCount  = (firstLine.match(/;/g) || []).length;
+    const commaCount = (firstLine.match(/,/g) || []).length;
+    const sep = semiCount > commaCount ? ';' : ',';
+    const wb = XLSX.read(text, {type:'string', raw:true, FS: sep});
+    aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1, defval:''});
+  } else {
+    const wb = XLSX.read(buffer, {type:'array', cellDates:false, dense:true});
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:'', raw:true});
+  }
+  rawData = mapRows(aoa);
+  if(!rawData.length) throw new Error('Nenhuma linha útil foi encontrada. Verifique se a primeira linha contém os cabeçalhos e se as colunas BA, BD, BH, BU, BT, CN, CO e CP existem.');
+  dateStart.value = ''; dateEnd.value = '';
+  populateFilters(); updateDashboard();
+}
+
 async function loadFile(file){
   showError(''); setLoading(true);
   try {
-    const ext = file.name.split('.').pop().toLowerCase();
     const buffer = await file.arrayBuffer();
-    let aoa;
-    if(ext === 'csv'){
-      const text = new TextDecoder('utf-8').decode(buffer);
-      // Detecta o separador olhando a primeira linha (cabeçalho).
-      // CSV pt-BR do Excel usa ";" (porque "," é o separador decimal).
-      // CSV en-US usa ",". Detectamos automaticamente pela contagem.
-      const firstLine = text.split(/\r?\n/)[0] || '';
-      const semiCount  = (firstLine.match(/;/g) || []).length;
-      const commaCount = (firstLine.match(/,/g) || []).length;
-      const sep = semiCount > commaCount ? ';' : ',';
-      const wb = XLSX.read(text, {type:'string', raw:true, FS: sep});
-      aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1, defval:''});
-    } else {
-      const wb = XLSX.read(buffer, {type:'array', cellDates:false, dense:true});
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:'', raw:true});
-    }
-    rawData = mapRows(aoa);
-    if(!rawData.length) throw new Error('Nenhuma linha útil foi encontrada. Verifique se a primeira linha contém os cabeçalhos e se as colunas BA, BD, BH, BU, BT, CN, CO e CP existem.');
-    dateStart.value = ''; dateEnd.value = '';
-    populateFilters(); updateDashboard();
+    await parseAndLoad(buffer, file.name);
   } catch(e) {
     console.error(e);
     showError('Não consegui carregar os dados: ' + e.message);
   } finally { setLoading(false); }
 }
+
+// === Auto-load: tenta carregar automaticamente um CSV do mesmo repositório ===
+// Ao publicar o dashboard (ex: GitHub Pages), colocar um arquivo chamado
+// "dashboard_dados.csv" na mesma pasta do index.html faz o dashboard abrir
+// já com os dados carregados, sem precisar de upload manual.
+// Se o arquivo não existir (404) ou der qualquer erro, falha silenciosamente
+// e a tela de upload continua disponível normalmente.
+const AUTO_LOAD_FILENAME = 'dashboard_dados.csv';
+
+async function tentarAutoLoad(){
+  try {
+    setLoading(true);
+    statusInfo.textContent = 'Verificando base automática...';
+    const resp = await fetch(AUTO_LOAD_FILENAME, {cache: 'no-store'});
+    if(!resp.ok) throw new Error('arquivo não encontrado');
+    const buffer = await resp.arrayBuffer();
+    await parseAndLoad(buffer, AUTO_LOAD_FILENAME);
+  } catch(e) {
+    // Sem base automática disponível — comportamento normal, mostra tela de upload.
+    statusInfo.textContent = 'Importe uma base Excel/CSV para carregar o dashboard.';
+  } finally {
+    setLoading(false);
+  }
+}
+// Dispara a tentativa assim que a página carrega
+tentarAutoLoad();
 
 fileInput.addEventListener('change', e => { if(e.target.files[0]) loadFile(e.target.files[0]); });
 [fParceiro,fStatus,fDestino,fPlano,fMethod,dateStart,dateEnd].forEach(el => el.addEventListener('change', updateDashboard));
