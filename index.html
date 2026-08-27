@@ -305,19 +305,21 @@ if (window.ChartDataLabels) { Chart.register(ChartDataLabels); }
 Chart.defaults.set('plugins.datalabels', { display: false });
 
 // ============================================================================
-// PARCEIROS COMPLEMENTARES (editar mensalmente conforme e-mails recebidos)
+// PARCEIROS COMPLEMENTARES (dados recebidos por e-mail, fora da base do Excel)
 // ----------------------------------------------------------------------------
-// Estes parceiros NÃO estão na base do Excel — só recebemos relatório por e-mail.
-// A comissão deles é somada ao KPI "Comissão Hero" e exibida em bloco separado.
+// Estes parceiros NÃO estão na base do Excel. A comissão deles é somada ao
+// KPI "Comissão Hero" e exibida em bloco separado.
 //
-// COMO EDITAR:
-// - Cada parceiro tem um objeto "meses" com chave no formato "YYYY-MM"
-// - Para adicionar um novo mês: adicione uma linha nesse objeto
-// - "unidade" = "bilhetes" ou "vidas" (define como o número aparece no card)
-// - Se você filtrar por um mês específico no dashboard, só os valores DAQUELE mês
-//   aparecem. Se filtrar por "Ano acumulado (YTD)", todos os meses somam.
+// COMO ATUALIZAR MENSALMENTE (fluxo automático, recomendado):
+// Edite o arquivo "parceiros_complementares.csv" na mesma pasta do index.html,
+// adicionando uma linha por parceiro/mês, no formato:
+//   Parceiro;Unidade;Mes;Comissao;Volume
+//   BOOKING;bilhetes;2026-07;12345.67;4000
+// "Unidade" = "bilhetes" ou "vidas". "Mes" = "AAAA-MM". Decimais com ponto.
+// O dashboard busca esse arquivo automaticamente ao abrir — não precisa mexer
+// no código. Se o arquivo não existir, os valores abaixo (fallback) são usados.
 // ============================================================================
-const PARCEIROS_COMPLEMENTARES = [
+let PARCEIROS_COMPLEMENTARES = [
   {
     nome: 'BOOKING',
     unidade: 'bilhetes',
@@ -1385,6 +1387,66 @@ async function loadFile(file){
   } finally { setLoading(false); }
 }
 
+// === Auto-load dos Parceiros Complementares ===
+// Ao publicar o dashboard, colocar um arquivo "parceiros_complementares.csv" na
+// mesma pasta do index.html faz o dashboard atualizar os valores de BOOKING,
+// ICATU, DAYCOVAL (e outros que forem adicionados) automaticamente, sem editar
+// código. Formato esperado (separador ; ou , — detectado automaticamente):
+//   Parceiro;Unidade;Mes;Comissao;Volume
+//   BOOKING;bilhetes;2026-07;12345.67;4000
+// Se o arquivo não existir ou tiver erro de formato, os valores fixos definidos
+// em PARCEIROS_COMPLEMENTARES (fallback, no topo do script) continuam valendo.
+const COMPLEMENTARES_FILENAME = 'parceiros_complementares.csv';
+
+async function tentarAutoLoadComplementares(){
+  try {
+    const resp = await fetch(COMPLEMENTARES_FILENAME, {cache: 'no-store'});
+    if(!resp.ok) return; // arquivo não existe: mantém o fallback, sem erro
+    const buffer = await resp.arrayBuffer();
+    const text = new TextDecoder('utf-8').decode(buffer);
+    const firstLine = text.split(/\r?\n/)[0] || '';
+    const semiCount  = (firstLine.match(/;/g) || []).length;
+    const commaCount = (firstLine.match(/,/g) || []).length;
+    const sep = semiCount > commaCount ? ';' : ',';
+    const rows = parseCSVFast(text, sep);
+    if(rows.length < 2) return; // só cabeçalho ou vazio: mantém o fallback
+
+    const headers = rows[0].map(h => norm(h));
+    const idxParceiro = headers.findIndex(h => h === 'parceiro');
+    const idxUnidade  = headers.findIndex(h => h === 'unidade');
+    const idxMes      = headers.findIndex(h => h === 'mes');
+    const idxComissao = headers.findIndex(h => h === 'comissao');
+    const idxVolume   = headers.findIndex(h => h === 'volume');
+    if(idxParceiro === -1 || idxMes === -1 || idxComissao === -1){
+      console.warn('parceiros_complementares.csv encontrado, mas colunas obrigatórias (Parceiro, Mes, Comissao) não foram identificadas. Mantendo valores padrão.');
+      return;
+    }
+
+    // Reconstrói a estrutura agrupada por parceiro, igual ao formato usado no dashboard
+    const porParceiro = new Map();
+    for(let i = 1; i < rows.length; i++){
+      const r = rows[i];
+      if(!r || !r[idxParceiro]) continue;
+      const nome = String(r[idxParceiro]).trim();
+      if(!nome) continue;
+      const unidade = idxUnidade >= 0 ? (String(r[idxUnidade]).trim() || 'bilhetes') : 'bilhetes';
+      const mes = String(r[idxMes]).trim();
+      const comissao = parseMoney(r[idxComissao]);
+      const volume = idxVolume >= 0 ? (Number(String(r[idxVolume]).replace(',', '.')) || 0) : 0;
+      if(!porParceiro.has(nome)) porParceiro.set(nome, {nome, unidade, meses: {}});
+      porParceiro.get(nome).meses[mes] = {comissao, volume};
+    }
+
+    if(porParceiro.size > 0){
+      PARCEIROS_COMPLEMENTARES = [...porParceiro.values()];
+      console.info('Parceiros complementares carregados automaticamente de', COMPLEMENTARES_FILENAME);
+    }
+  } catch(e) {
+    // Qualquer erro aqui não deve travar o dashboard principal — só mantém o fallback.
+    console.error('Erro ao carregar parceiros_complementares.csv (mantendo valores padrão):', e);
+  }
+}
+
 // === Auto-load: tenta carregar automaticamente um CSV do mesmo repositório ===
 // Ao publicar o dashboard (ex: GitHub Pages), colocar um arquivo chamado
 // "dashboard_dados.csv" na mesma pasta do index.html faz o dashboard abrir
@@ -1394,6 +1456,9 @@ async function loadFile(file){
 const AUTO_LOAD_FILENAME = 'dashboard_dados.csv';
 
 async function tentarAutoLoad(){
+  // Carrega os complementares em paralelo, antes de processar a base principal,
+  // para que já estejam disponíveis quando o dashboard renderizar pela primeira vez.
+  await tentarAutoLoadComplementares();
   try {
     setLoading(true);
     statusInfo.textContent = 'Verificando base automática...';
