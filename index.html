@@ -1295,6 +1295,59 @@ document.getElementById('opSearch').addEventListener('input', e => {
 document.getElementById('opPrev').addEventListener('click', () => { opState.page--; renderOpTable(filtered()); });
 document.getElementById('opNext').addEventListener('click', () => { opState.page++; renderOpTable(filtered()); });
 
+// Parser de CSV nativo, leve e rápido — evita usar o SheetJS (pesado, feito para
+// formatos binários do Excel) em arquivos CSV grandes, que travava o navegador
+// com bases de centenas de milhares de linhas.
+function parseCSVFast(text, sep){
+  // Caminho rápido: se o texto não contém nenhuma aspa dupla, um split simples
+  // é MUITO mais rápido que o parser caractere-a-caractere, e cobre o caso comum
+  // (CSV exportado do Excel sem campos com separador/quebra de linha internos).
+  if(text.indexOf('"') === -1){
+    const lines = text.split('\n');
+    const rows = [];
+    for(let i = 0; i < lines.length; i++){
+      let line = lines[i];
+      if(line.charCodeAt(line.length-1) === 13) line = line.slice(0, -1); // remove \r
+      if(line === '' && i === lines.length - 1) continue; // última linha vazia
+      rows.push(line.split(sep));
+    }
+    return rows;
+  }
+  // Caminho completo (com suporte a campos entre aspas) para arquivos mais complexos.
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  const len = text.length;
+  for(let i = 0; i < len; i++){
+    const c = text[i];
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i++; }
+        else { inQuotes = false; }
+      } else {
+        field += c;
+      }
+    } else {
+      if(c === '"'){
+        inQuotes = true;
+      } else if(c === sep){
+        row.push(field); field = '';
+      } else if(c === '\r'){
+        // ignora, trata a quebra de linha no \n
+      } else if(c === '\n'){
+        row.push(field); field = '';
+        rows.push(row); row = [];
+      } else {
+        field += c;
+      }
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  while(rows.length && rows[rows.length-1].length === 1 && rows[rows.length-1][0] === '') rows.pop();
+  return rows;
+}
+
 // Parseia um ArrayBuffer (CSV ou XLSX) e popula rawData + dashboard.
 // Reutilizada tanto pelo upload manual quanto pelo auto-load do repositório.
 async function parseAndLoad(buffer, filename){
@@ -1309,8 +1362,7 @@ async function parseAndLoad(buffer, filename){
     const semiCount  = (firstLine.match(/;/g) || []).length;
     const commaCount = (firstLine.match(/,/g) || []).length;
     const sep = semiCount > commaCount ? ';' : ',';
-    const wb = XLSX.read(text, {type:'string', raw:true, FS: sep});
-    aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1, defval:''});
+    aoa = parseCSVFast(text, sep);
   } else {
     const wb = XLSX.read(buffer, {type:'array', cellDates:false, dense:true});
     const ws = wb.Sheets[wb.SheetNames[0]];
@@ -1346,11 +1398,22 @@ async function tentarAutoLoad(){
     setLoading(true);
     statusInfo.textContent = 'Verificando base automática...';
     const resp = await fetch(AUTO_LOAD_FILENAME, {cache: 'no-store'});
-    if(!resp.ok) throw new Error('arquivo não encontrado');
+    if(!resp.ok){
+      // Arquivo não existe no repositório — comportamento normal, sem erro.
+      statusInfo.textContent = 'Importe uma base Excel/CSV para carregar o dashboard.';
+      return;
+    }
     const buffer = await resp.arrayBuffer();
+    // Cede o controle ao navegador por um instante antes do processamento pesado,
+    // garantindo que a mensagem "Processando base..." apareça na tela primeiro.
+    statusInfo.textContent = 'Processando base automática, aguarde...';
+    await new Promise(r => setTimeout(r, 30));
     await parseAndLoad(buffer, AUTO_LOAD_FILENAME);
   } catch(e) {
-    // Sem base automática disponível — comportamento normal, mostra tela de upload.
+    // Arquivo foi encontrado mas algo falhou ao processar — mostra o erro de verdade
+    // em vez de esconder atrás da mensagem genérica de "importe uma base".
+    console.error('Erro no auto-load:', e);
+    showError('A base automática (' + AUTO_LOAD_FILENAME + ') foi encontrada, mas houve um erro ao processá-la: ' + e.message);
     statusInfo.textContent = 'Importe uma base Excel/CSV para carregar o dashboard.';
   } finally {
     setLoading(false);
